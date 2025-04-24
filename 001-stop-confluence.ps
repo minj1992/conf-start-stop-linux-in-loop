@@ -1,0 +1,111 @@
+# stop confluence
+#$webServersfqdn = server1.dummy.com
+#$z6UserOnly = "server1.dummy.com"
+#$z6Password = "server1.dummy.com"
+#Write-Host "Print server list: $(webServersfqdn)"
+
+# Split the server list into an array
+$servers1 = 'server1.dummy.com','server1.dummy.com'
+$servers = $servers1 -split ','
+
+# Credentials and service name
+$username = 'server1.dummy.com'
+$password = 'server1.dummy.com'
+$confService = "confluence"
+
+# Function to run SSH commands
+function Run-SSHCommand($sshSession, $command) {
+    try {
+        Write-Output "Running command: $command"
+        $result = Invoke-SSHCommand -SessionId $sshSession.SessionId -Command $command
+        Write-Output "Command result: $($result.Output)"
+        return $result.Output
+    } catch {
+        Write-Error "Error occurred while executing command: $_"
+        return $null
+    }
+}
+
+# Function to check Confluence status
+function Check-confStatus($sshSession) {
+    $statusCommand = "sudo systemctl is-active $confService"
+    Write-Output "Checking status with command: $statusCommand"
+    return Run-SSHCommand $sshSession $statusCommand
+}
+
+# Function to stop Confluence service
+function Stop-confService($sshSession) {
+    $stopCommand = "sudo systemctl stop $confService"
+    Write-Output "Stopping Confluence with command: $stopCommand"
+    return Run-SSHCommand $sshSession $stopCommand
+}
+
+# Function to kill Java processes
+function Kill-JavaProcesses($sshSession) {
+    $killCommand = "sudo pkill -f java"
+    Write-Output "Killing Java processes with command: $killCommand"
+    Run-SSHCommand $sshSession $killCommand
+}
+
+# Loop through each server and stop Confluence
+foreach ($server in $servers) {
+    try {
+        $sshSession = New-SSHSession -ComputerName $server -Credential (New-Object PSCredential($username, (ConvertTo-SecureString $password -AsPlainText -Force))) -AcceptKey
+        Write-Output "SSH session secured successfully for $server."
+    } catch {
+        Write-Error "Failed to establish SSH session for $server."
+        continue
+    }
+
+    $stopResult = Stop-confService($sshSession)
+
+    if ($stopResult -eq $null) {
+        Write-Output "Skipping further checks for $server due to command execution failure."
+        Remove-SSHSession -SessionId $sshSession.SessionId
+        continue
+    }
+
+    for ($i = 1; $i -le 4; $i++) {
+        $status = Check-confStatus($sshSession)
+        if ($status -eq "inactive" -or $status -eq "failed") {
+            Write-Output "Confluence has been successfully stopped on $server."
+            break
+        } elseif ($status -eq "active") {
+            Write-Output "Confluence is still running on $server. Attempt $i of 4."
+        } else {
+            Write-Output "Unexpected status on $server : $status. Please check Confluence manually."
+            break
+        }
+        Start-Sleep -Seconds 15
+    }
+
+    if ($status -eq "active") {
+        Write-Output "Could not stop Confluence on $server after multiple attempts. Attempting to kill Java processes..."
+        Kill-JavaProcesses($sshSession)
+
+        $stopResult = Stop-confService($sshSession)
+
+        for ($i = 1; $i -le 4; $i++) {
+            $status = Check-confStatus($sshSession)
+            if ($status -eq "inactive" -or $status -eq "failed") {
+                Write-Output "Confluence has been successfully stopped on $server after killing Java processes."
+                break
+            } elseif ($status -eq "active") {
+                Write-Output "Confluence is still running on $server after killing Java processes. Attempt $i of 4."
+            } else {
+                Write-Output "Unexpected status on $server : $status. Please check Confluence manually."
+                break
+            }
+            Start-Sleep -Seconds 5
+        }
+
+        if ($status -eq "active") {
+            Write-Output "Could not stop Confluence on $server after multiple attempts, even after killing Java processes. Please check manually."
+        }
+    }
+
+    Remove-SSHSession -SessionId $sshSession.SessionId
+}
+
+Write-Output "Confluence stop process completed on all servers."
+exit 0
